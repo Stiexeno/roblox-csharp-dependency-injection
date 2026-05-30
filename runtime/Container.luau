@@ -1,0 +1,140 @@
+-- DI container. Holds bindings (key -> Binder) and singleton cache,
+-- resolves dependencies through the compiler-emitted __ctorParams
+-- metadata that lives on every class table.
+--
+-- API matches Zenject as closely as the platform allows: Bind /
+-- BindInterfacesTo / BindInterfacesAndSelfTo, fluent .To / .FromInstance
+-- / .AsSingle / .AsTransient on the returned Binder, Resolve<T>(),
+-- Install<T>(), Bootstrap() to fire IInitializable lifecycles.
+
+local Binder = require(script.Parent.Binder)
+local IInitializable = require(script.Parent.IInitializable)
+
+local Container = {}
+Container.__index = Container
+
+function Container.new()
+	local self = setmetatable({}, Container)
+	self._bindings = {}     -- [typeKey] = Binder
+	self._singletons = {}   -- [implType] = constructed singleton (lazy cache)
+	return self
+end
+
+-- `Bind<T>()` lowers via [Reified] to `Bind(T)`. T arrives as the
+-- class / interface table the user wants to register against.
+function Container:Bind(typeKey)
+	return Binder.new(self, { typeKey })
+end
+
+-- `BindInterfacesTo<T>()` walks T's interface set (including inherited)
+-- and registers the binding under each. Matches Zenject's behavior of
+-- spraying a single impl across every contract it satisfies.
+function Container:BindInterfacesTo(implType)
+	local interfaces = self:_collectInterfaces(implType)
+	if #interfaces == 0 then
+		warn(string.format(
+			"[DI] BindInterfacesTo: %s declares no interfaces; binding to self",
+			tostring(implType)))
+		return Binder.new(self, { implType }):To(implType)
+	end
+	return Binder.new(self, interfaces):To(implType)
+end
+
+-- `BindInterfacesAndSelfTo<T>()` — also registers the binding under
+-- T itself, on top of every declared interface. Useful for concrete
+-- types you also want to Resolve directly.
+function Container:BindInterfacesAndSelfTo(implType)
+	local keys = { implType }
+	for _, iface in ipairs(self:_collectInterfaces(implType)) do
+		table.insert(keys, iface)
+	end
+	return Binder.new(self, keys):To(implType)
+end
+
+-- `Install<T>()` constructs the installer with the container itself
+-- as the argument and invokes InstallBindings. This deliberately
+-- bypasses normal DI resolution — installers are part of the
+-- bootstrap, not application services, so they don't go through Bind.
+function Container:Install(installerType)
+	local installer = installerType.new(self)
+	installer:InstallBindings()
+end
+
+-- `Resolve<T>()` returns an instance for the bound key. Errors when
+-- nothing is bound — silent nil-returns would defer the problem to
+-- whatever first dereferences the result.
+function Container:Resolve(typeKey)
+	local binding = self._bindings[typeKey]
+	if binding == nil then
+		error(string.format("[DI] No binding registered for %s", tostring(typeKey)), 2)
+	end
+	return binding:_provide(self)
+end
+
+-- Walks every registered binding once; for each unique impl whose
+-- interface set includes IInitializable, resolves it (which seeds the
+-- singleton cache if AsSingle was used) and calls Initialize().
+--
+-- Idempotent in the singleton case — re-running Bootstrap re-uses
+-- cached instances rather than re-initializing them. Transient
+-- bindings would re-initialize on every Bootstrap; users should
+-- mark IInitializable services AsSingle.
+function Container:Bootstrap()
+	local seen = {}
+	for _, binding in pairs(self._bindings) do
+		local impl = binding._implType
+		if impl ~= nil and not seen[impl] then
+			seen[impl] = true
+			if self:_implementsInterface(impl, IInitializable) then
+				local instance = binding:_provide(self)
+				if instance.Initialize then
+					instance:Initialize()
+				end
+			end
+		end
+	end
+end
+
+-- Collects every interface declared on `implType` and on its base
+-- classes. Walks the metatable chain — same shape the class scaffold
+-- uses for method inheritance, so a derived class picks up its
+-- parents' interfaces automatically.
+function Container:_collectInterfaces(implType)
+	local result = {}
+	local seen = {}
+	local current = implType
+	while current ~= nil do
+		local interfaces = rawget(current, "__interfaces")
+		if interfaces then
+			for _, iface in ipairs(interfaces) do
+				if not seen[iface] then
+					seen[iface] = true
+					table.insert(result, iface)
+				end
+			end
+		end
+		local mt = getmetatable(current)
+		current = mt and mt.__index or nil
+	end
+	return result
+end
+
+function Container:_implementsInterface(implType, interfaceType)
+	for _, iface in ipairs(self:_collectInterfaces(implType)) do
+		if iface == interfaceType then return true end
+	end
+	return false
+end
+
+-- Internal hook the Binder calls during .AsSingle/.AsTransient. Kept
+-- separate so the Binder doesn't poke at `_bindings` directly.
+function Container:_addBinding(typeKey, binding)
+	if self._bindings[typeKey] ~= nil then
+		warn(string.format(
+			"[DI] Re-binding %s — previous binding will be overwritten",
+			tostring(typeKey)))
+	end
+	self._bindings[typeKey] = binding
+end
+
+return Container
