@@ -8,7 +8,13 @@
 -- Install<T>(), Bootstrap() to fire IInitializable lifecycles.
 
 local Binder = require(script.Parent.Binder)
-local IInitializable = require(script.Parent.IInitializable)
+
+-- Interfaces have no runtime artifact in roblox-csharp — they're
+-- identified by their simple name as a string at every reference
+-- site. Hardcoding the literal here keeps Container's lifecycle
+-- check (`if implements IInitializable then Initialize()`) aligned
+-- with what user classes get for their `__interfaces` table.
+local IInitializable = "IInitializable"
 
 local Container = {}
 Container.__index = Container
