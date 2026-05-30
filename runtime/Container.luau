@@ -23,6 +23,11 @@ function Container.new()
 	local self = setmetatable({}, Container)
 	self._bindings = {}     -- [typeKey] = Binder
 	self._singletons = {}   -- [implType] = constructed singleton (lazy cache)
+	-- Stack of keys currently mid-resolve. Pushed on Resolve entry,
+	-- popped on exit. Used for two diagnostics:
+	--   - cycle detection (same key appears twice while resolving)
+	--   - unbound errors (show the chain that led to the failure)
+	self._resolveStack = {}
 	return self
 end
 
@@ -67,14 +72,63 @@ function Container:Install(installerType)
 end
 
 -- `Resolve<T>()` returns an instance for the bound key. Errors when
--- nothing is bound — silent nil-returns would defer the problem to
--- whatever first dereferences the result.
+-- nothing is bound, when a binding's construction throws, or when
+-- the request would close a circular-dependency loop. The error
+-- messages include the active resolve chain so debugging deep DI
+-- graphs doesn't require staring at line-numbered traces.
 function Container:Resolve(typeKey)
+	-- Cycle check first — has to fire before we even look at the
+	-- binding, otherwise a binding that hasn't yet cached its
+	-- singleton would just recurse and stack-overflow.
+	for i, inProgress in ipairs(self._resolveStack) do
+		if inProgress == typeKey then
+			error(string.format("[DI] Circular dependency: %s",
+				self:_formatCycle(i, typeKey)), 2)
+		end
+	end
+
 	local binding = self._bindings[typeKey]
 	if binding == nil then
-		error(string.format("[DI] No binding registered for %s", tostring(typeKey)), 2)
+		error(string.format("[DI] No binding registered for %s%s",
+			tostring(typeKey), self:_formatChain()), 2)
 	end
-	return binding:_provide(self)
+
+	table.insert(self._resolveStack, typeKey)
+	local ok, result = pcall(binding._provide, binding, self)
+	table.remove(self._resolveStack)
+
+	if not ok then
+		-- Re-raise the inner error verbatim. Level 0 keeps Luau from
+		-- prepending another file:line to a message that already has
+		-- one (or that we built deliberately above).
+		error(result, 0)
+	end
+	return result
+end
+
+-- Renders the chain that led to the current Resolve call as an
+-- arrow-joined string. Returns an empty string when the stack is
+-- empty (i.e., this is the user's top-level Resolve), so callers
+-- can blindly concatenate without conditionals.
+function Container:_formatChain()
+	if #self._resolveStack == 0 then return "" end
+	local parts = {}
+	for _, t in ipairs(self._resolveStack) do
+		table.insert(parts, tostring(t))
+	end
+	return " (resolving: " .. table.concat(parts, " -> ") .. ")"
+end
+
+-- Builds the cycle path from the position where the duplicate was
+-- found to the end of the stack, then back to the duplicate to
+-- close the loop visually: `A -> B -> C -> A`.
+function Container:_formatCycle(firstIndex, repeatedKey)
+	local parts = {}
+	for i = firstIndex, #self._resolveStack do
+		table.insert(parts, tostring(self._resolveStack[i]))
+	end
+	table.insert(parts, tostring(repeatedKey))
+	return table.concat(parts, " -> ")
 end
 
 -- Walks every registered binding once; for each unique impl whose
