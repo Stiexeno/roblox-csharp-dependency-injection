@@ -8,6 +8,7 @@
 -- Install<T>(), Bootstrap() to fire IInitializable lifecycles.
 
 local Binder = require(script.Parent.Binder)
+local Instantiator = require(script.Parent.Instantiator)
 
 -- Interfaces have no runtime artifact in roblox-csharp — they're
 -- identified by their simple name as a string at every reference
@@ -28,6 +29,17 @@ function Container.new()
 	--   - cycle detection (same key appears twice while resolving)
 	--   - unbound errors (show the chain that led to the failure)
 	self._resolveStack = {}
+	-- Self-bind so any service that takes Container as a ctor param
+	-- (StateFactory, ComponentsService, plugin-provided service
+	-- factories) resolves cleanly instead of hitting "no binding
+	-- registered". FromInstance bypasses ctor resolution so this is
+	-- safe even before the user's bindings land.
+	Binder.new(self, { Container }):FromInstance(self):AsSingle()
+	-- Auto-bind the Instantiator under its interface so user code
+	-- can `IInstantiator instantiator` ctor-inject without an
+	-- explicit Bind in their installer. Same Zenject convention —
+	-- the container ships an instantiator as a built-in service.
+	Binder.new(self, { "IInstantiator" }):FromInstance(Instantiator.new(self)):AsSingle()
 	return self
 end
 
