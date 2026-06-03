@@ -1,29 +1,27 @@
 namespace DependencyInjection
 {
-    // C# stubs for the DI plugin. Bodies are never executed — the
-    // compiler routes references to these types onto the Lua runtime
-    // under ReplicatedStorage.Plugins.DependencyInjection.
-    //
-    // Generic methods get their type arguments surfaced as runtime
-    // arguments automatically — no opt-in attribute. `Container.Bind<IFoo>()`
-    // becomes `Container:Bind(IFoo)` so the container can key bindings
-    // by table identity.
+    /// <summary>
+    /// DI container. Collect bindings via <see cref="Install{T}"/> then call
+    /// <see cref="Bootstrap"/> to instantiate singletons and wire dependencies.
+    /// </summary>
     public class Container
     {
+        /// <summary>Starts a new binding for <typeparamref name="T"/>.</summary>
         public Binder Bind<T>() => null;
 
+        /// <summary>Binds every interface implemented by <typeparamref name="T"/> to the same instance.</summary>
         public Binder BindInterfacesTo<T>() => null;
 
+        /// <summary>Binds <typeparamref name="T"/> and all its interfaces to the same instance.</summary>
         public Binder BindInterfacesAndSelfTo<T>() => null;
 
+        /// <summary>Resolves the registered binding for <typeparamref name="T"/>.</summary>
         public T Resolve<T>() => default;
 
+        /// <summary>Runs the installer's <c>InstallBindings</c> against this container.</summary>
         public void Install<T>() where T : Installer { }
 
-        // Resolves every registered binding whose implementation
-        // implements IInitializable and calls Initialize() on each.
-        // Idempotent — safe to call again after adding more bindings,
-        // but services already initialized won't fire a second time.
+        /// <summary>Materializes singletons and invokes <see cref="IInitializable.Initialize"/> hooks.</summary>
         public void Bootstrap() { }
     }
 }

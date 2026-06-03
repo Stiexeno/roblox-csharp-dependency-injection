@@ -1,10 +1,9 @@
 namespace DependencyInjection
 {
-    // Base for the user's binding-declaration classes. Inherit, override
-    // InstallBindings, and have the bootstrap call Container.Install<T>()
-    // to invoke. Mirrors Zenject's PlainAbstractInstaller — there's no
-    // MonoInstaller-equivalent in Roblox since we have no scene contexts
-    // to attach to.
+    /// <summary>
+    /// Base class for binding registrations. Override <see cref="InstallBindings"/>
+    /// and call <see cref="Container.Install{T}"/> to apply.
+    /// </summary>
     public abstract class Installer
     {
         protected Container Container { get; }
@@ -14,6 +13,7 @@ namespace DependencyInjection
             Container = container;
         }
 
+        /// <summary>Registers bindings against <see cref="Container"/>. Called by <c>Install</c>.</summary>
         public abstract void InstallBindings();
     }
 }

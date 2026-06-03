@@ -1,17 +1,21 @@
 namespace DependencyInjection
 {
-    // Fluent binder returned by Container.Bind* methods. The chain
-    // terminates with .AsSingle() / .AsTransient(), which registers the
-    // binding with the container.
+    /// <summary>
+    /// Fluent builder returned by <see cref="Container.Bind{T}"/>. Configures
+    /// which concrete type resolves the binding and the binding's lifetime.
+    /// </summary>
     public class Binder
     {
+        /// <summary>Routes the binding to the concrete type <typeparamref name="T"/>.</summary>
         public Binder To<T>() => this;
 
-        // Bind to an externally-constructed instance. Common shape for
-        // Roblox services (game:GetService(...)) or pre-built Contexts.
+        /// <summary>Resolves the binding to a specific pre-built instance.</summary>
         public Binder FromInstance(object instance) => this;
 
+        /// <summary>One shared instance lives for the container's lifetime.</summary>
         public Binder AsSingle() => this;
+
+        /// <summary>A fresh instance is constructed on every <c>Resolve</c>.</summary>
         public Binder AsTransient() => this;
     }
 }

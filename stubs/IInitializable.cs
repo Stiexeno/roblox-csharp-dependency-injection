@@ -1,9 +1,9 @@
 namespace DependencyInjection
 {
-    // Marker for services that need a one-shot startup hook. Implement
-    // and the container's Bootstrap() will call Initialize() on you
-    // after all bindings are registered. Matches Zenject's interface
-    // of the same name.
+    /// <summary>
+    /// Lifecycle hook invoked once after the binding's instance is constructed
+    /// and its dependencies are injected, during <see cref="Container.Bootstrap"/>.
+    /// </summary>
     public interface IInitializable
     {
         void Initialize();
