@@ -200,8 +200,15 @@ end
 
 -- Internal hook the Binder calls during .AsSingle/.AsTransient. Kept
 -- separate so the Binder doesn't poke at `_bindings` directly.
+--
+-- IInitializable is suppressed from the re-binding warning because it
+-- isn't a Resolve target — it's a marker the Bootstrap loop scans for
+-- across every binding (not just the one keyed by IInitializable). Two
+-- services both implementing IInitializable is the normal pattern, and
+-- both get Initialize() called. The warning would only mean something
+-- if a user did `Resolve<IInitializable>()`, which never happens.
 function Container:_addBinding(typeKey, binding)
-	if self._bindings[typeKey] ~= nil then
+	if self._bindings[typeKey] ~= nil and typeKey ~= IInitializable then
 		warn(string.format(
 			"[DI] Re-binding %s — previous binding will be overwritten",
 			tostring(typeKey)))
