@@ -3,9 +3,9 @@
 -- the user's GameInstaller boot tail), so this module has no side
 -- effects.
 --
--- IInitializable / IDisposable aren't exported as Lua artifacts —
--- interfaces in roblox-csharp lower to string names at every
--- reference site, so there's nothing to import.
+-- IInitializable isn't exported as a Lua artifact — interfaces in
+-- roblox-csharp lower to string names at every reference site, so
+-- there's nothing to import.
 
 return {
 	Container = require(script.Container),

@@ -18,6 +18,12 @@ Instantiator.__ctorParams = {}
 Instantiator.__interfaces = { "IInstantiator" }
 
 function Instantiator.new(container)
+	-- __ctorParams is empty (declaring Container there would be a
+	-- circular require), so DI-constructing this class hands in nil.
+	-- Catch that here instead of nil-deref'ing inside Instantiate.
+	if container == nil then
+		error("[DI] Instantiator requires the container — resolve IInstantiator instead of binding Instantiator directly", 2)
+	end
 	local self = setmetatable({}, Instantiator)
 	self._container = container
 	return self

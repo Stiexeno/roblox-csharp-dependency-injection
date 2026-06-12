@@ -1,10 +1,18 @@
 -- Fluent binder. Container.Bind*() returns one of these; the chain
 -- terminates with AsSingle/AsTransient which calls back into the
--- container to register. Until that terminator runs, the binding
--- is in a draft state and not yet resolvable.
+-- container to register. Until that terminator runs, the binding is
+-- in a draft state and not yet resolvable — the container tracks it
+-- as "open" and Bootstrap errors if any chain was left unterminated.
 
 local Binder = {}
 Binder.__index = Binder
+
+setmetatable(Binder, {
+	__tostring = function() return "Binder" end,
+})
+
+Binder.__ctorParams = {}
+Binder.__interfaces = {}
 
 function Binder.new(container, typeKeys)
 	local self = setmetatable({}, Binder)
@@ -13,6 +21,7 @@ function Binder.new(container, typeKeys)
 	self._implType = nil          -- the concrete class table to instantiate
 	self._instance = nil          -- explicit instance (FromInstance path)
 	self._isSingle = false
+	container:_trackBinder(self)
 	return self
 end
 
@@ -25,7 +34,7 @@ end
 function Binder:FromInstance(instance)
 	self._instance = instance
 	-- Recover implType from the instance's metatable so Bootstrap can
-	-- still walk this binding when checking IInitializable / IDisposable.
+	-- still walk this binding when checking IInitializable.
 	if self._implType == nil then
 		self._implType = getmetatable(instance)
 	end
@@ -60,6 +69,7 @@ function Binder:_register()
 	for _, key in ipairs(self._typeKeys) do
 		self._container:_addBinding(key, self)
 	end
+	self._container:_untrackBinder(self)
 end
 
 -- Container calls this when resolving a key bound by this binder.

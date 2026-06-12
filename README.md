@@ -1,23 +1,20 @@
 # roblox-csharp-dependency-injection
 
-Zenject-style DI container packaged as a [roblox-csharp](https://github.com/Stiexeno/roblox-csharp) plugin. Fluent bindings, constructor injection, `IInitializable` lifecycle, `[Server]` / `[Client]` auto-bootstrap.
+Zenject-style DI container for [roblox-csharp](https://github.com/Stiexeno/roblox-csharp): fluent bindings, constructor injection via compiler-emitted `__ctorParams`, `IInitializable` bootstrap lifecycle, `ServerInstaller` / `ClientInstaller` auto-boot.
 
 ## Install
-
-From your roblox-csharp project root (requires roblox-csharp `0.1.0-alpha.7` or newer):
 
 ```sh
 roblox-csharp plugin add Stiexeno/roblox-csharp-dependency-injection
 ```
 
-That drops the plugin into `plugins/DependencyInjection/`. Recompile (`roblox-csharp` or `roblox-csharp dev`) and the runtime mounts at `ReplicatedStorage.Plugins.DependencyInjection`.
+Requires roblox-csharp `0.1.0-alpha.52+`. No other dependencies. Runtime mounts at `ReplicatedStorage.Plugins.DependencyInjection`.
 
 ## Quick start
 
 ```csharp
 using DependencyInjection;
 
-// Define a service. Constructor params get resolved by the container.
 public interface IGameStateMachine { void EnterBootstrap(); }
 
 public class GameStateMachine : IGameStateMachine
@@ -25,27 +22,18 @@ public class GameStateMachine : IGameStateMachine
     public void EnterBootstrap() { /* ... */ }
 }
 
-// IInitializable services run once at boot.
 public class EntryPoint : IInitializable
 {
     private readonly IGameStateMachine _stateMachine;
 
-    public EntryPoint(IGameStateMachine stateMachine)
-    {
-        _stateMachine = stateMachine;
-    }
+    public EntryPoint(IGameStateMachine stateMachine) => _stateMachine = stateMachine;
 
-    public void Initialize()
-    {
-        _stateMachine.EnterBootstrap();
-    }
+    public void Initialize() => _stateMachine.EnterBootstrap();
 }
 
-// ServerInstaller is auto-bootstrapped: the file compiles to a
-// .server.luau Script that Roblox runs on startup, and the compiler
-// appends a boot tail (construct Container, instantiate this class
-// with it, call InstallBindings, call Bootstrap). All you write is
-// the bindings.
+// Compiles to a .server.luau Script. The compiler appends the boot
+// tail: new Container() -> new GameInstaller(container) ->
+// InstallBindings() -> Bootstrap(). You only write the bindings.
 public class GameInstaller : ServerInstaller
 {
     public GameInstaller(Container container) : base(container) { }
@@ -58,60 +46,57 @@ public class GameInstaller : ServerInstaller
 }
 ```
 
-Use `ClientInstaller` for client-side bootstraps; same shape, compiles to `.client.luau`.
+`ClientInstaller` is the same shape, emitted as `.client.luau`. Server and client each get their own container.
 
-## API surface
+## API
 
 ### Container
 
-| Method | Purpose |
+| Method | Behavior |
 |---|---|
-| `Bind<T>()` | Start a binding for type `T`. Returns a `Binder`. |
-| `BindInterfacesTo<T>()` | Bind `T` to every interface it implements. |
-| `BindInterfacesAndSelfTo<T>()` | Bind `T` to its interfaces AND to itself. |
-| `Resolve<T>()` | Get an instance for a registered type. Errors if unbound. |
-| `Install<T>()` where `T : Installer` | Create the installer with the container and call `InstallBindings`. |
-| `Bootstrap()` | Resolve every `IInitializable` binding and call `Initialize()`. |
+| `Bind<T>()` | Start a binding keyed by `T`. With no `.To()`, the key binds to itself. |
+| `BindInterfacesTo<T>()` | Bind `T` under every interface it (or a base class) declares. Warns and self-binds if `T` has none. |
+| `BindInterfacesAndSelfTo<T>()` | Same, plus a binding under `T` itself. |
+| `Resolve<T>()` | Return the bound instance. Errors with the full resolve chain when unbound or circular. |
+| `Install<T>()` | `new T(container)` + `InstallBindings()`. Installers bypass DI resolution. |
+| `Bootstrap()` | Construct every binding whose impl declares `IInitializable` and call `Initialize()`, in bind order. Each construction/`Initialize()` is error-isolated: a throwing service warns, the rest still run. Errors if any binding chain was left without a lifetime. |
+
+Binding after `Bootstrap()` warns — the late binding resolves, but its `Initialize()` never runs.
 
 ### Binder (fluent)
 
-| Method | Purpose |
-|---|---|
-| `To<T>()` | Specify the concrete implementation type. |
-| `FromInstance(obj)` | Use a pre-built instance instead of constructing. |
-| `AsSingle()` | Cache one instance; subsequent resolves return the same one. |
-| `AsTransient()` | Construct a fresh instance per resolve. |
+`To<T>()` · `FromInstance(obj)` · `AsSingle()` · `AsTransient()`
 
-### Lifecycle interfaces
+**A binding only registers when `AsSingle()` or `AsTransient()` runs.** A chain that stops at `.To<T>()` makes `Bootstrap()` error, naming the unterminated type.
 
-- **`IInitializable`** — `Initialize()` called by `Container.Bootstrap()` for every binding whose impl implements this.
-- **`IDisposable`** — marker for cleanup. Container teardown is not wired in v1.
+Singletons are cached per concrete impl type, so a type bound under several keys yields one shared instance. Re-binding an existing key overwrites it with a warning.
 
-### Bootstrap base classes
+### Built-in bindings
 
-- **`ServerInstaller`** — inherit, override `InstallBindings`. Compiles to `.server.luau`, auto-runs server-side.
-- **`ClientInstaller`** — same, compiles to `.client.luau`, auto-runs in players.
+The container auto-binds itself (inject `Container`) and an `IInstantiator` — `Instantiate<T>()` constructs an unbound `T` with its ctor params resolved from the container; caller owns the lifetime.
 
-## How it works
+### Lifecycle
 
-The compiler emits two pieces of metadata on every class:
+- `IInitializable.Initialize()` — called by `Bootstrap()`, in the order services were bound.
+- No teardown lifecycle — there is no `IDisposable` equivalent.
+
+## How resolution works
+
+The compiler emits on every class:
 
 ```lua
-EntryPoint.__ctorParams = {IGameStateMachine}    -- constructor parameter types
-EntryPoint.__interfaces = {IInitializable}        -- declared interfaces
+EntryPoint.__ctorParams = {IGameStateMachine}  -- ctor parameter type identities
+EntryPoint.__interfaces = {"IInitializable"}   -- declared interface names
 ```
 
-`__ctorParams` lets the container resolve constructor arguments recursively — no reflection at runtime, the metadata is baked in at transpile time. `__interfaces` lets `BindInterfacesTo<T>()` enumerate everything `T` implements (including inherited interfaces from base classes, walked via the metatable chain) and lets `Bootstrap()` find `IInitializable` implementers.
+`Resolve` walks `__ctorParams` recursively. `BindInterfacesTo` walks `__interfaces` up the metatable chain (inherited interfaces included). No runtime reflection.
 
-Generic method calls automatically surface their type arguments at runtime: `Container.Bind<IFoo>()` compiles to `Container:Bind(IFoo)`, with the type table arriving as a real parameter the container can key bindings off.
+## Caveats
 
-## What's not in v1
-
-- **`IEnumerable<T>` injection** — Zenject lets you inject a collection of all bound implementers. Not wired yet; deferred until a real use case appears.
-- **`[Inject]` on fields / methods** — currently only constructor injection. The marker attribute exists; the compiler doesn't honor it yet.
-- **`Container.Dispose()`** — `IDisposable` marker exists; teardown not wired.
-- **Sub-containers / scopes** — single container per app for v1.
-- **Conditional bindings** (`.When(...)`) — not yet.
+- **Interfaces are string identities (simple name).** Two interfaces with the same name in different namespaces are the same binding key. A user interface literally named `IInitializable` opts into the bootstrap lifecycle.
+- **Circular dependencies are detected, not supported** — `Resolve` errors with the cycle path (`A -> B -> A`); there is no lazy/proxy resolution.
+- Transient `IInitializable` bindings are re-constructed and re-initialized on every `Bootstrap()`; mark them `AsSingle()`.
+- Constructor injection only — no `[Inject]` fields/methods, no `IEnumerable<T>` multi-injection, no sub-containers, no conditional bindings.
 
 ## License
 

@@ -20,10 +20,26 @@ local IInitializable = "IInitializable"
 local Container = {}
 Container.__index = Container
 
+setmetatable(Container, {
+	__tostring = function() return "Container" end,
+})
+
+Container.__ctorParams = {}
+Container.__interfaces = {}
+
 function Container.new()
 	local self = setmetatable({}, Container)
-	self._bindings = {}     -- [typeKey] = Binder
+	self._bindings = {}     -- [typeKey] = Binder (lookup for Resolve)
+	-- Ordered list of every registered Binder, in bind order. Bootstrap
+	-- iterates THIS, not the map: map keys collide (two IInitializable-only
+	-- services share one key) and pairs() order is nondeterministic.
+	self._bindingList = {}
 	self._singletons = {}   -- [implType] = constructed singleton (lazy cache)
+	-- Binders that started a chain but haven't hit AsSingle/AsTransient
+	-- yet. Bootstrap errors if any remain — a `.To<T>()` chain with no
+	-- lifetime would otherwise be silently dropped.
+	self._openBinders = {}
+	self._bootstrapped = false
 	-- Stack of keys currently mid-resolve. Pushed on Resolve entry,
 	-- popped on exit. Used for two diagnostics:
 	--   - cycle detection (same key appears twice while resolving)
@@ -46,6 +62,7 @@ end
 -- `Bind<T>()` lowers via [Reified] to `Bind(T)`. T arrives as the
 -- class / interface table the user wants to register against.
 function Container:Bind(typeKey)
+	self:_warnIfBootstrapped("Bind")
 	return Binder.new(self, { typeKey })
 end
 
@@ -53,6 +70,7 @@ end
 -- and registers the binding under each. Matches Zenject's behavior of
 -- spraying a single impl across every contract it satisfies.
 function Container:BindInterfacesTo(implType)
+	self:_warnIfBootstrapped("BindInterfacesTo")
 	local interfaces = self:_collectInterfaces(implType)
 	if #interfaces == 0 then
 		warn(string.format(
@@ -67,6 +85,7 @@ end
 -- T itself, on top of every declared interface. Useful for concrete
 -- types you also want to Resolve directly.
 function Container:BindInterfacesAndSelfTo(implType)
+	self:_warnIfBootstrapped("BindInterfacesAndSelfTo")
 	local keys = { implType }
 	for _, iface in ipairs(self:_collectInterfaces(implType)) do
 		table.insert(keys, iface)
@@ -143,24 +162,45 @@ function Container:_formatCycle(firstIndex, repeatedKey)
 	return table.concat(parts, " -> ")
 end
 
--- Walks every registered binding once; for each unique impl whose
--- interface set includes IInitializable, resolves it (which seeds the
--- singleton cache if AsSingle was used) and calls Initialize().
+-- Walks every registered binding in bind order; for each unique impl
+-- whose interface set includes IInitializable, resolves it (which seeds
+-- the singleton cache if AsSingle was used) and calls Initialize().
+--
+-- Each construction and Initialize() is pcall-isolated: one throwing
+-- service warns and the rest still come up.
 --
 -- Idempotent in the singleton case — re-running Bootstrap re-uses
 -- cached instances rather than re-initializing them. Transient
 -- bindings would re-initialize on every Bootstrap; users should
 -- mark IInitializable services AsSingle.
 function Container:Bootstrap()
+	for binder in pairs(self._openBinders) do
+		local names = {}
+		for _, key in ipairs(binder._typeKeys) do
+			table.insert(names, tostring(key))
+		end
+		error(string.format(
+			"[DI] Binding for %s was never registered — finish the chain with :AsSingle() or :AsTransient()",
+			table.concat(names, ", ")), 2)
+	end
+	self._bootstrapped = true
+
 	local seen = {}
-	for _, binding in pairs(self._bindings) do
+	for _, binding in ipairs(self._bindingList) do
 		local impl = binding._implType
 		if impl ~= nil and not seen[impl] then
 			seen[impl] = true
 			if self:_implementsInterface(impl, IInitializable) then
-				local instance = binding:_provide(self)
-				if instance.Initialize then
-					instance:Initialize()
+				local ok, instance = pcall(binding._provide, binding, self)
+				if not ok then
+					warn(string.format("[DI] Bootstrap: constructing %s failed: %s",
+						tostring(impl), tostring(instance)))
+				elseif instance.Initialize then
+					local initOk, err = pcall(instance.Initialize, instance)
+					if not initOk then
+						warn(string.format("[DI] Bootstrap: %s.Initialize() failed: %s",
+							tostring(impl), tostring(err)))
+					end
 				end
 			end
 		end
@@ -201,19 +241,59 @@ end
 -- Internal hook the Binder calls during .AsSingle/.AsTransient. Kept
 -- separate so the Binder doesn't poke at `_bindings` directly.
 --
--- IInitializable is suppressed from the re-binding warning because it
--- isn't a Resolve target — it's a marker the Bootstrap loop scans for
--- across every binding (not just the one keyed by IInitializable). Two
--- services both implementing IInitializable is the normal pattern, and
+-- IInitializable is suppressed from the re-binding warning (and from
+-- the orphan drop below) because it isn't a Resolve target — it's a
+-- marker Bootstrap scans for across the ordered binding list. Two
+-- services both implementing IInitializable is the normal pattern;
+-- their map entries collide but both survive in `_bindingList` and
 -- both get Initialize() called. The warning would only mean something
 -- if a user did `Resolve<IInitializable>()`, which never happens.
 function Container:_addBinding(typeKey, binding)
-	if self._bindings[typeKey] ~= nil and typeKey ~= IInitializable then
+	local previous = self._bindings[typeKey]
+	self._bindings[typeKey] = binding
+
+	if previous ~= nil and previous ~= binding and typeKey ~= IInitializable then
 		warn(string.format(
 			"[DI] Re-binding %s — previous binding will be overwritten",
 			tostring(typeKey)))
+		self:_dropOrphanedBinding(previous)
 	end
-	self._bindings[typeKey] = binding
+
+	if table.find(self._bindingList, binding) == nil then
+		table.insert(self._bindingList, binding)
+	end
+end
+
+-- A re-bound key may leave its previous Binder unreachable through the
+-- map. Drop it from the ordered list so Bootstrap doesn't initialize a
+-- binding the user explicitly replaced.
+function Container:_dropOrphanedBinding(previous)
+	for _, b in pairs(self._bindings) do
+		if b == previous then return end
+	end
+	local index = table.find(self._bindingList, previous)
+	if index ~= nil then
+		table.remove(self._bindingList, index)
+	end
+end
+
+-- Binder lifecycle hooks: a Binder is "open" from construction until
+-- a lifetime call registers it. Bootstrap refuses to run while any
+-- chain is still open.
+function Container:_trackBinder(binder)
+	self._openBinders[binder] = true
+end
+
+function Container:_untrackBinder(binder)
+	self._openBinders[binder] = nil
+end
+
+function Container:_warnIfBootstrapped(method)
+	if self._bootstrapped then
+		warn(string.format(
+			"[DI] %s called after Bootstrap — the binding will resolve but its Initialize() will never run",
+			method))
+	end
 end
 
 return Container
