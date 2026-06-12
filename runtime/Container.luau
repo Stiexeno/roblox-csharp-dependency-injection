@@ -5,7 +5,9 @@
 -- API matches Zenject as closely as the platform allows: Bind /
 -- BindInterfacesTo / BindInterfacesAndSelfTo, fluent .To / .FromInstance
 -- / .AsSingle / .AsTransient on the returned Binder, Resolve<T>(),
--- Install<T>(), Bootstrap() to fire IInitializable lifecycles.
+-- Install<T>(), Bootstrap() to fire IInitializable lifecycles and wire
+-- ITickable / IFixedTickable / ILateTickable singletons to RunService
+-- (the container owns the only tick connections in the process).
 
 local Binder = require(script.Parent.Binder)
 local Instantiator = require(script.Parent.Instantiator)
@@ -16,6 +18,19 @@ local Instantiator = require(script.Parent.Instantiator)
 -- check (`if implements IInitializable then Initialize()`) aligned
 -- with what user classes get for their `__interfaces` table.
 local IInitializable = "IInitializable"
+local ITickable = "ITickable"
+local IFixedTickable = "IFixedTickable"
+local ILateTickable = "ILateTickable"
+
+-- Marker interfaces scanned by Bootstrap rather than resolved by key —
+-- many services sharing one of these is the normal pattern, so the
+-- re-binding warning and orphan drop don't apply to them.
+local markerInterfaces = {
+	[IInitializable] = true,
+	[ITickable] = true,
+	[IFixedTickable] = true,
+	[ILateTickable] = true,
+}
 
 local Container = {}
 Container.__index = Container
@@ -205,6 +220,78 @@ function Container:Bootstrap()
 			end
 		end
 	end
+
+	self:_wireTickables()
+end
+
+-- Collects every singleton implementing ITickable / IFixedTickable /
+-- ILateTickable (in bind order) and drives them from RunService:
+--   client: RenderStepped → Tick (pre-frame), Heartbeat → LateTick
+--   server: Heartbeat → Tick then LateTick (one connection, in order;
+--           RenderStepped doesn't exist there)
+--   both:   Stepped → FixedTick (pre-physics)
+-- Runs after every Initialize() so no tick fires on a half-built
+-- service. Wired once — a second Bootstrap doesn't double-connect.
+-- Ticks are not pcall-isolated: an error in one tickable skips the
+-- rest for that frame (the connection itself survives).
+function Container:_wireTickables()
+	if self._tickConnections ~= nil then return end
+
+	local tickables, fixedTickables, lateTickables = {}, {}, {}
+	local seen = {}
+	for _, binding in ipairs(self._bindingList) do
+		local impl = binding._implType
+		if impl ~= nil and not seen[impl] then
+			seen[impl] = true
+			local isTickable = self:_implementsInterface(impl, ITickable)
+			local isFixed = self:_implementsInterface(impl, IFixedTickable)
+			local isLate = self:_implementsInterface(impl, ILateTickable)
+			if isTickable or isFixed or isLate then
+				local ok, instance = pcall(binding._provide, binding, self)
+				if not ok then
+					warn(string.format("[DI] Bootstrap: constructing tickable %s failed: %s",
+						tostring(impl), tostring(instance)))
+				else
+					if isTickable then table.insert(tickables, instance) end
+					if isFixed then table.insert(fixedTickables, instance) end
+					if isLate then table.insert(lateTickables, instance) end
+				end
+			end
+		end
+	end
+
+	if #tickables == 0 and #fixedTickables == 0 and #lateTickables == 0 then
+		return
+	end
+
+	local RunService = game:GetService("RunService")
+	self._tickConnections = {}
+
+	local function dispatch(list, methodName, dt)
+		for _, instance in ipairs(list) do
+			instance[methodName](instance, dt)
+		end
+	end
+
+	if RunService:IsClient() then
+		table.insert(self._tickConnections, RunService.RenderStepped:Connect(function(dt)
+			dispatch(tickables, "Tick", dt)
+		end))
+		table.insert(self._tickConnections, RunService.Heartbeat:Connect(function(dt)
+			dispatch(lateTickables, "LateTick", dt)
+		end))
+	else
+		table.insert(self._tickConnections, RunService.Heartbeat:Connect(function(dt)
+			dispatch(tickables, "Tick", dt)
+			dispatch(lateTickables, "LateTick", dt)
+		end))
+	end
+
+	if #fixedTickables > 0 then
+		table.insert(self._tickConnections, RunService.Stepped:Connect(function(_time, dt)
+			dispatch(fixedTickables, "FixedTick", dt)
+		end))
+	end
 end
 
 -- Collects every interface declared on `implType` and on its base
@@ -252,7 +339,7 @@ function Container:_addBinding(typeKey, binding)
 	local previous = self._bindings[typeKey]
 	self._bindings[typeKey] = binding
 
-	if previous ~= nil and previous ~= binding and typeKey ~= IInitializable then
+	if previous ~= nil and previous ~= binding and markerInterfaces[typeKey] ~= true then
 		warn(string.format(
 			"[DI] Re-binding %s — previous binding will be overwritten",
 			tostring(typeKey)))

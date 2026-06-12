@@ -21,7 +21,11 @@ namespace DependencyInjection
         /// <summary>Runs the installer's <c>InstallBindings</c> against this container.</summary>
         public void Install<T>() where T : Installer { }
 
-        /// <summary>Materializes singletons and invokes <see cref="IInitializable.Initialize"/> hooks.</summary>
+        /// <summary>
+        /// Materializes singletons, invokes <see cref="IInitializable.Initialize"/>
+        /// hooks, then wires <see cref="ITickable"/> / <see cref="IFixedTickable"/> /
+        /// <see cref="ILateTickable"/> singletons to RunService (bind order).
+        /// </summary>
         public void Bootstrap() { }
     }
 }

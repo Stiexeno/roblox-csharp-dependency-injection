@@ -78,6 +78,10 @@ The container auto-binds itself (inject `Container`) and an `IInstantiator` — 
 ### Lifecycle
 
 - `IInitializable.Initialize()` — called by `Bootstrap()`, in the order services were bound.
+- `ITickable.Tick(dt)` — per frame, container-driven after `Bootstrap()`: `RenderStepped` on the client (pre-frame), `Heartbeat` on the server. Singletons only, bind order.
+- `IFixedTickable.FixedTick(dt)` — `RunService.Stepped` (pre-physics, both sides).
+- `ILateTickable.LateTick(dt)` — `RunService.Heartbeat` (both sides; after `Tick` on the server, where they share one connection). The Roblox frame runs RenderStepped → Stepped → physics → Heartbeat.
+- The container owns the only RunService connections in the process — services implement the tick interfaces instead of connecting themselves.
 - No teardown lifecycle — there is no `IDisposable` equivalent.
 
 ## How resolution works
